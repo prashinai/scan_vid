@@ -19,17 +19,22 @@ the whole recording's range (so nothing jumps), with a vertical cursor and a dot
 ## Install
 
 ```powershell
-python -m pip install -r requirements.txt
+py -m pip install -r requirements.txt
 ```
 
-Python 3.10+. `imageio-ffmpeg` ships its own ffmpeg binary and writes H.264; without it the script falls back
+Python 3.10+. On Windows these commands use the `py` launcher, which finds your installed Python even when
+`python` isn't on PATH (typing `python` then opens the Microsoft Store instead). On macOS/Linux use `python3`.
+
+`imageio-ffmpeg` ships its own ffmpeg binary and writes H.264; without it the script falls back
 to OpenCV's `mp4v` writer.
 
 ## Usage
 
 ```powershell
-python stray_dashboard.py "D:\path\to\stray scanner videos\9c74aaa7f0"
+py stray_dashboard.py "D:\path\to\stray scanner videos\9c74aaa7f0"
 ```
+
+Tip: in File Explorer, right-click the recording folder → **Copy as path** and paste it in (quotes included).
 
 Writes `9c74aaa7f0_dashboard.mp4` **next to** the recording folder (never inside it). A 12 s recording renders
 in about 20 s at 1920 px wide.
@@ -47,7 +52,7 @@ in about 20 s at 1920 px wide.
 Batch over several recordings:
 
 ```powershell
-python stray_dashboard.py "D:\scans\9c74aaa7f0" "D:\scans\ec1e820f1b"
+py stray_dashboard.py "D:\scans\9c74aaa7f0" "D:\scans\ec1e820f1b"
 ```
 
 ## Stray Scanner data format
