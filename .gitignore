@@ -1,0 +1,21 @@
+# Rendered dashboards and any video
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Stray Scanner recordings: large and may show private spaces. Never commit them.
+recordings/
+data/
+depth/
+confidence/
+*.csv
+*.png
+!docs/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
