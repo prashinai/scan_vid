@@ -19,3 +19,6 @@ __pycache__/
 .venv/
 venv/
 .ipynb_checkpoints/
+
+# RealSense takes (default location is recordings/, but catch stray take folders too)
+rs_*/

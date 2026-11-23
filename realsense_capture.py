@@ -31,6 +31,7 @@ import argparse
 import json
 import queue
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -55,7 +56,8 @@ GREY = (160, 160, 160)
 
 
 def default_out_dir() -> Path:
-    return Path.home() / "Videos" / "RealSense"
+    # "recordings" next to this script; git-ignored, so takes never end up in the repo
+    return Path(__file__).resolve().parent / "recordings"
 
 
 def intrinsics_dict(i) -> dict:
@@ -200,6 +202,67 @@ class Take:
                 f"            dashboard: py stray_dashboard.py \"{out}\"")
 
 
+class DashboardMaker(threading.Thread):
+    """Runs stray_dashboard.py on each saved take, one at a time, in a low-priority subprocess.
+
+    A separate process keeps the rendering (CPU heavy, matplotlib) from stealing time from the capture loop.
+    """
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.q: queue.Queue = queue.Queue()
+        self.script = Path(__file__).resolve().with_name("stray_dashboard.py")
+        self.current: str | None = None
+        self.proc: subprocess.Popen | None = None
+        self.last = ""
+
+    @property
+    def pending(self) -> int:
+        return self.q.qsize() + (1 if self.current else 0)
+
+    def add(self, take_dir: Path):
+        self.q.put(take_dir)
+
+    def run(self):
+        flags = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)  # Windows only; 0 elsewhere
+        while True:
+            take_dir = self.q.get()
+            if take_dir is None:
+                break
+            out = take_dir.parent / f"{take_dir.name}_dashboard.mp4"
+            self.current = take_dir.name
+            print(f"dashboard : rendering {out.name} ...", flush=True)
+            t0 = time.time()
+            try:
+                # stdin=DEVNULL matters on Windows: the terminal-command thread keeps a blocking read on our
+                # stdin, and a child sharing that handle can hang during Python start-up.
+                self.proc = subprocess.Popen([sys.executable, str(self.script), str(take_dir), "-o", str(out)],
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                             stderr=subprocess.STDOUT, text=True, creationflags=flags)
+                log, _ = self.proc.communicate()
+                if self.proc.returncode == 0:
+                    print(f"dashboard : {out}  ({time.time() - t0:.0f} s)", flush=True)
+                    self.last = out.name
+                else:
+                    print(f"ERROR making dashboard for {take_dir.name} (exit {self.proc.returncode}):\n"
+                          + "\n".join(log.strip().splitlines()[-8:]), file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"ERROR making dashboard for {take_dir.name}: {e}", file=sys.stderr, flush=True)
+            finally:
+                self.proc = None
+                self.current = None
+
+    def cancel(self):
+        """Drop queued renders and stop the running one."""
+        while not self.q.empty():
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                break
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
+
+
 # --------------------------------------------------------------------------
 # Live view
 # --------------------------------------------------------------------------
@@ -250,6 +313,10 @@ def draw_view(color: np.ndarray, depth_mm: np.ndarray, st: dict) -> np.ndarray:
         status.append(f"saving {st['saving']} take(s)...")
     if st.get("last_saved"):
         status.append(f"last saved: {st['last_saved']}")
+    if st.get("dash_pending"):
+        status.append(f"making dashboard ({st['dash_pending']} queued)...")
+    elif st.get("last_dashboard"):
+        status.append(f"dashboard ready: {st['last_dashboard']}")
     if status:
         cv2.putText(img, "   ".join(status), (16, y + 44), font, 0.5, GREY, 1, cv2.LINE_AA)
     return img
@@ -261,7 +328,7 @@ def draw_view(color: np.ndarray, depth_mm: np.ndarray, st: dict) -> np.ndarray:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Live view + start/stop recording for a RealSense D435i/D435if.")
     p.add_argument("-o", "--out-dir", type=Path, default=None,
-                   help="folder that receives one rs_<date>_<time> folder per take (default: ~/Videos/RealSense)")
+                   help="folder that receives one rs_<date>_<time> folder per take (default: recordings\ next to this script)")
     p.add_argument("--record", action="store_true", help="start recording immediately")
     p.add_argument("--duration", type=float, help="record one take of this many seconds, then exit (implies --record)")
     p.add_argument("--no-window", action="store_true", help="no live window; control from the terminal only")
@@ -273,6 +340,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-imu", action="store_true", help="record without the motion module")
     p.add_argument("--warmup", type=float, default=1.0, help="seconds to let auto-exposure settle before --record starts")
     p.add_argument("--serial", help="camera serial number, if several are connected")
+    p.add_argument("--no-dashboard", action="store_true",
+                   help="don't render <take>_dashboard.mp4 after each take (default: render it in the background)")
     a = p.parse_args(argv)
     if a.duration:
         a.record = True
@@ -363,6 +432,13 @@ def main(argv=None) -> int:
     # --- start / stop ---
     finishers: list[threading.Thread] = []
     ui = {"last_saved": "", "info": ""}
+    dash = None if a.no_dashboard else DashboardMaker()
+    if dash:
+        if dash.script.is_file():
+            dash.start()
+        else:
+            print(f"warning: {dash.script.name} not found next to this script; no dashboards", file=sys.stderr)
+            dash = None
 
     def saving_count() -> int:
         return sum(t.is_alive() for t in finishers)
@@ -393,6 +469,8 @@ def main(argv=None) -> int:
             try:
                 print(take.finish(), flush=True)
                 ui["last_saved"] = take.out.name
+                if dash and take.rows:
+                    dash.add(take.out)
             except Exception as e:
                 print(f"ERROR saving {take.out}: {e}", file=sys.stderr, flush=True)
 
@@ -417,7 +495,12 @@ def main(argv=None) -> int:
 
     threading.Thread(target=read_stdin, daemon=True).start()
     quit_ev = threading.Event()
-    signal.signal(signal.SIGINT, lambda *_: quit_ev.set())
+    def on_sigint(*_):
+        if quit_ev.is_set():  # second Ctrl+C while finishing: skip remaining dashboards
+            raise KeyboardInterrupt
+        quit_ev.set()
+
+    signal.signal(signal.SIGINT, on_sigint)
 
     print("controls  : " + ("window: Space / R = start/stop, Q / Esc = quit;  " if show else "")
           + "terminal: Enter (or r) = start/stop, q = quit, Ctrl+C = quit", flush=True)
@@ -481,6 +564,7 @@ def main(argv=None) -> int:
                 st = {"recording": take is not None, "elapsed": take.elapsed if take else 0.0,
                       "frames": len(take.rows) if take else 0, "take": take.out.name if take else "",
                       "saving": saving_count(), "last_saved": ui["last_saved"],
+                      "dash_pending": dash.pending if dash else 0, "last_dashboard": dash.last if dash else "",
                       "info": "starting in a moment ..." if pending_record else ""}
                 cv2.imshow(WINDOW, draw_view(color, depth_mm, st))
                 key = cv2.waitKey(1) & 0xFF
@@ -501,6 +585,17 @@ def main(argv=None) -> int:
             print("finishing : waiting for takes to be saved ...", flush=True)
         for t in finishers:
             t.join()
+        if dash:
+            if dash.pending > 0:
+                print(f"finishing : making {dash.pending} dashboard(s); Ctrl+C to skip "
+                      "(you can run stray_dashboard.py on the take folder later)", flush=True)
+            dash.add(None)  # sentinel: exit after the queued renders
+            try:
+                while dash.is_alive():
+                    dash.join(0.5)  # short joins so Ctrl+C is noticed
+            except KeyboardInterrupt:
+                dash.cancel()
+                print("skipped   : remaining dashboards not made", flush=True)
     print("bye")
     return 0
 

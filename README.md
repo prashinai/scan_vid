@@ -128,18 +128,30 @@ A **live view** window opens straight away (RGB | depth) but nothing is recorded
 | quit | **Q**, **Esc** or close the window | `q` or Ctrl+C |
 
 While recording, the window gets a **red border** and a red banner with a blinking ● **REC** timer, the frame
-count and the take's folder name. When idle it shows a green **LIVE (not recording)** banner. Every start/stop
-creates a new take folder `%USERPROFILE%\Videos\RealSense\rs_<date>_<time>\` (outside the repo). It is saved in
-the background, so the live view keeps running and you can start the next take straight away. The terminal
-prints the `stray_dashboard.py` command for each saved take, e.g.:
+count and the take's folder name. When idle it shows a green **LIVE (not recording)** banner.
+
+Every start/stop creates a new take folder in **`recordings\` next to the script**:
+
+```
+D:\stray-scanner-dashboard\recordings\
+    rs_20261122_231502\                 the recording (rgb.mp4, depth\, imu.csv, ...)
+    rs_20261122_231502_dashboard.mp4    the dashboard video, made automatically
+```
+
+`recordings\` is git-ignored, so takes never get committed. The take is saved in the background, then its
+**dashboard video is rendered automatically** in a separate low-priority process, one take at a time, so the
+live view keeps running and you can record the next take straight away. The window's bottom line and the
+terminal show the progress. A dashboard takes about 2× the take's length to render. When you quit, the script
+waits for queued dashboards; press Ctrl+C again to skip them. You can always make or remake one later:
 
 ```powershell
-py stray_dashboard.py "$env:USERPROFILE\Videos\RealSense\rs_20261122_224237"
+py stray_dashboard.py "recordings\rs_20261122_231502"
 ```
 
 | option | meaning |
 | --- | --- |
-| `-o DIR` | folder that receives the take folders (default `~\Videos\RealSense`) |
+| `-o DIR` | folder that receives the take folders (default `recordings\` next to the script) |
+| `--no-dashboard` | don't render the dashboard video after each take |
 | `--record` | start the first take immediately (after `--warmup`) |
 | `--duration S` | record one take of S seconds, then exit (implies `--record`; handy for scripts) |
 | `--no-window` | no live window; control from the terminal only |
