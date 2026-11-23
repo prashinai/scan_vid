@@ -52,8 +52,13 @@ BASE_WIDTH = 1920  # all sizes below are designed for this width and scaled
 # --------------------------------------------------------------------------
 # Loading
 # --------------------------------------------------------------------------
+# per-frame table: Stray Scanner writes odometry.csv (with pose); realsense_capture.py writes frames.csv (no pose)
+FRAME_TABLES = ("odometry.csv", "frames.csv")
+POSE_COLUMNS = ("x", "y", "z", "qx", "qy", "qz", "qw")
+
+
 def find_recording_dir(path: Path) -> Path:
-    """Return the folder that actually holds rgb.mp4 / odometry.csv.
+    """Return the folder that actually holds rgb.mp4 + odometry.csv (Stray Scanner) or frames.csv (RealSense).
 
     Stray Scanner exports often unzip to <id>/<id>/..., so accept either level.
     """
@@ -62,19 +67,18 @@ def find_recording_dir(path: Path) -> Path:
         raise FileNotFoundError(f"not a folder: {path}")
 
     def is_rec(p: Path) -> bool:
-        return (p / "odometry.csv").is_file() and (p / "rgb.mp4").is_file()
+        return (p / "rgb.mp4").is_file() and any((p / n).is_file() for n in FRAME_TABLES)
 
     if is_rec(path):
         return path
     same = path / path.name
     if is_rec(same):
         return same
-    hits = sorted(p.parent for p in path.glob("*/odometry.csv") if is_rec(p.parent))
-    hits += sorted(p.parent for p in path.glob("*/*/odometry.csv") if is_rec(p.parent))
+    hits = sorted({p.parent for pat in ("*/rgb.mp4", "*/*/rgb.mp4") for p in path.glob(pat) if is_rec(p.parent)})
     if len(hits) == 1:
         return hits[0]
     if not hits:
-        raise FileNotFoundError(f"no Stray Scanner recording (rgb.mp4 + odometry.csv) under {path}")
+        raise FileNotFoundError(f"no recording (rgb.mp4 + odometry.csv or frames.csv) under {path}")
     raise RuntimeError(
         f"several recordings under {path}; pass one of them:\n  " + "\n  ".join(map(str, hits))
     )
@@ -155,6 +159,8 @@ class Recording:
     rgb_count: int
     rgb_fps: float
     has_conf: bool
+    has_pose: bool
+    frame_table: str
 
     def depth_path(self, frame: int) -> Path:
         return self.root / "depth" / f"{frame:06d}.png"
@@ -164,8 +170,10 @@ class Recording:
 
 
 def load_recording(root: Path) -> Recording:
-    odom = read_csv(root / "odometry.csv")
+    table = next(n for n in FRAME_TABLES if (root / n).is_file())
+    odom = read_csv(root / table)
     odom = odom.dropna(subset=["timestamp"]).reset_index(drop=True)
+    has_pose = all(c in odom.columns for c in POSE_COLUMNS) and not odom[list(POSE_COLUMNS)].isna().any().any()
     odom["frame"] = odom["frame"].astype(int)
     imu_path = root / "imu.csv"
     imu = read_csv(imu_path) if imu_path.is_file() else None
@@ -191,6 +199,8 @@ def load_recording(root: Path) -> Recording:
         rgb_count=rgb_count,
         rgb_fps=rgb_fps,
         has_conf=(root / "confidence").is_dir(),
+        has_pose=has_pose,
+        frame_table=table,
     )
 
 
@@ -218,10 +228,12 @@ def auto_depth_range(rec: Recording, samples: int = 40) -> tuple[float, float]:
 # Top row (OpenCV)
 # --------------------------------------------------------------------------
 class TopRow:
-    def __init__(self, width: int, scale: float, rgb_aspect: float, depth_range, min_conf: int):
+    def __init__(self, width: int, scale: float, rgb_aspect: float, depth_range, min_conf: int, has_conf: bool = True):
         self.width = width
         self.s = scale
-        self.cell_w = width // 3
+        self.has_conf = has_conf
+        self.titles = ["RGB", "Depth"] + (["Confidence"] if has_conf else [])
+        self.cell_w = width // len(self.titles)
         self.img_w = self.cell_w - 2 * self.pad
         self.img_h = int(round(self.img_w / rgb_aspect))
         self.title_h = int(round(38 * scale))
@@ -244,8 +256,7 @@ class TopRow:
 
     def _make_template(self):
         img = np.full((self.height, self.width, 3), BG_BGR, np.uint8)
-        titles = ["RGB", "Depth", "Confidence"]
-        for k, title in enumerate(titles):
+        for k, title in enumerate(self.titles):
             x0 = k * self.cell_w + self.pad
             self._text(img, title, (x0, int(self.title_h * 0.72)))
         y_cap = self.title_h + self.img_h
@@ -270,7 +281,7 @@ class TopRow:
         x = 2 * self.cell_w + self.pad
         box = int(round(18 * self.s))
         y = y_cap + int(round(12 * self.s))
-        for lvl in (0, 1, 2):
+        for lvl in (0, 1, 2) if self.has_conf else ():
             cv2.rectangle(img, (x, y), (x + box, y + box), CONF_COLORS_BGR[lvl], -1)
             label = f"{lvl} = {CONF_NAMES[lvl]}"
             self._text(img, label, (x + box + int(8 * self.s), y + box - int(3 * self.s)), self.fs_small, FG_BGR, 1)
@@ -302,7 +313,7 @@ class TopRow:
             dcol[~valid] = 0
             self._place(canvas, 1, cv2.resize(dcol, (self.img_w, self.img_h), interpolation=cv2.INTER_NEAREST))
         # confidence
-        if conf is not None:
+        if self.has_conf and conf is not None:
             ccol = np.zeros(conf.shape + (3,), np.uint8)
             for lvl, col in CONF_COLORS_BGR.items():
                 ccol[conf == lvl] = col
@@ -311,7 +322,7 @@ class TopRow:
             stats = "  ".join(f"{CONF_NAMES[l][0].upper()} {p:4.1f}%" for l, p in zip((0, 1, 2), share))
             (tw, _), _ = cv2.getTextSize(stats, self.font, self.fs_small, 1)
             self._text(canvas, stats, (3 * self.cell_w - self.pad - tw, int(self.title_h * 0.72)), self.fs_small, DIM_BGR, 1)
-        else:
+        elif self.has_conf:  # folder exists but this frame's PNG is missing
             x0 = 2 * self.cell_w + self.pad
             self._text(canvas, "no confidence data", (x0 + 20, self.title_h + self.img_h // 2), self.fs, DIM_BGR)
         # RGB caption: time and frame
@@ -338,7 +349,11 @@ class PlotRows:
             }
         )
         self.fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi, facecolor=BG)
-        gs = self.fig.add_gridspec(2, 2, left=0.045, right=0.99, top=0.93, bottom=0.10, hspace=0.42, wspace=0.10)
+        n_rows = 2 if rec.has_pose else 1  # no pose (e.g. RealSense): IMU row only
+        if n_rows == 2:
+            gs = self.fig.add_gridspec(2, 2, left=0.045, right=0.99, top=0.93, bottom=0.10, hspace=0.42, wspace=0.10)
+        else:
+            gs = self.fig.add_gridspec(1, 2, left=0.045, right=0.99, top=0.88, bottom=0.17, wspace=0.10)
         span = (0.0, rec.t_end - rec.t0)
         self.series = []  # (t, [y arrays], [Line2D], [marker Line2D])
         self.cursors = []
@@ -350,7 +365,7 @@ class PlotRows:
             ax.grid(True, color=GRID, linewidth=0.6)
             ax.set_xlim(*span)
             ax.set_ylabel(ylabel)
-            if r == 1:
+            if r == n_rows - 1:
                 ax.set_xlabel("time (s)")
             lo = min(np.nanmin(y) for y in ys)
             hi = max(np.nanmax(y) for y in ys)
@@ -381,11 +396,12 @@ class PlotRows:
                 ax = self.fig.add_subplot(gs[0, c])
                 ax.set_facecolor(AX_BG)
                 ax.set_title(name + " (no imu.csv)", loc="left", fontsize=11, color=FG)
-        o = rec.odom
-        to = o["timestamp"].to_numpy() - rec.t0
-        pos, pl, pt, ang, al, at = pose_series(o, pose_mode)
-        make_axes(1, 0, pt, to, pos, pl, "position (m)")
-        make_axes(1, 1, at, to, ang, al, "angle (deg)")
+        if rec.has_pose:
+            o = rec.odom
+            to = o["timestamp"].to_numpy() - rec.t0
+            pos, pl, pt, ang, al, at = pose_series(o, pose_mode)
+            make_axes(1, 0, pt, to, pos, pl, "position (m)")
+            make_axes(1, 1, at, to, ang, al, "angle (deg)")
 
         self.fig.canvas.draw()
         self.bg = self.fig.canvas.copy_from_bbox(self.fig.bbox)
@@ -492,7 +508,11 @@ def render(folder: Path, out: Path | None, fps: float | None, width: int, depth_
     native_fps = (n_odom - 1) / (t_odom[-1] - t_odom[0]) if n_odom > 1 else 30.0
 
     print(f"recording : {root}")
-    print(f"odometry  : {n_odom} rows, {t_odom[-1] - t_odom[0]:.2f} s, ~{native_fps:.2f} Hz")
+    print(f"frames    : {rec.frame_table}, {n_odom} rows, {t_odom[-1] - t_odom[0]:.2f} s, ~{native_fps:.2f} Hz, "
+          + ("with pose" if rec.has_pose else "no pose (odometry row omitted)")
+          + ("" if rec.has_conf else ", no confidence maps"))
+    if pose_mode != "absolute" and not rec.has_pose:
+        print("  note: --relative ignored, this recording has no pose")
     if rec.imu is not None:
         ti = rec.imu["timestamp"].to_numpy()
         print(f"imu       : {len(ti)} rows, ~{(len(ti) - 1) / (ti[-1] - ti[0]):.1f} Hz")
@@ -522,8 +542,8 @@ def render(folder: Path, out: Path | None, fps: float | None, width: int, depth_
 
     width = int(width) // 16 * 16  # H.264 macro blocks
     scale = width / BASE_WIDTH
-    top = TopRow(width, scale, aspect, depth_range, min_conf)
-    plot_h = int(round(560 * scale))
+    top = TopRow(width, scale, aspect, depth_range, min_conf, rec.has_conf)
+    plot_h = int(round((560 if rec.has_pose else 300) * scale))
     total_h = top.height + plot_h
     total_h = int(np.ceil(total_h / 16) * 16)
     plot_h = total_h - top.height

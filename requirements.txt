@@ -3,3 +3,5 @@ pandas>=2.0
 matplotlib>=3.7
 opencv-python>=4.8
 imageio-ffmpeg>=0.4.9
+# only needed for realsense_capture.py (Intel RealSense D435i / D435if)
+pyrealsense2>=2.55

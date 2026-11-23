@@ -1,4 +1,4 @@
-# stray-scanner-dashboard
+# scan_vid: Stray Scanner & RealSense dashboards
 
 Turn a [Stray Scanner](https://apps.apple.com/app/stray-scanner/id1557051662) iPhone/iPad recording into **one dashboard MP4** that shows every stream in sync:
 
@@ -15,6 +15,9 @@ Turn a [Stray Scanner](https://apps.apple.com/app/stray-scanner/id1557051662) iP
 
 The time-series lines **grow as the video plays**: each frame plots data only up to "now", on axes fixed to
 the whole recording's range (so nothing jumps), with a vertical cursor and a dot at the current value.
+
+The repo also has [`realsense_capture.py`](#intel-realsense-capture), which records RGB + depth + IMU from an Intel
+RealSense D435i / D435if into the same folder layout, so the dashboard script renders those recordings too.
 
 ## Install
 
@@ -106,6 +109,60 @@ only the starting point and the axes change.
 ```powershell
 py stray_dashboard.py "D:\scans\9c74aaa7f0" --relative
 ```
+
+## Intel RealSense capture
+
+`realsense_capture.py` records from an Intel RealSense **D435i / D435if** (D435 + IMU; the "f" model adds an
+IR-pass filter) over USB 3. It uses `pyrealsense2` (in `requirements.txt`; the Intel RealSense Viewer/SDK
+installer is not needed).
+
+```powershell
+py realsense_capture.py --preview
+```
+
+The `--preview` window shows RGB | depth live; press **q** or **Esc** to stop (or Ctrl+C in the terminal).
+Recordings go to `%USERPROFILE%\Videos\RealSense\rs_<date>_<time>\` by default, outside the repo. Then:
+
+```powershell
+py stray_dashboard.py "$env:USERPROFILE\Videos\RealSense\rs_20261122_224237"
+```
+
+| option | meaning |
+| --- | --- |
+| `-o DIR` | output folder (must be new or empty) |
+| `--duration S` | stop after S seconds |
+| `--preview` | live RGB / depth window |
+| `--width W --height H --fps N` | colour + depth mode, default 640×480 @ 30. The D435if also offers 848×480, 1280×720 (30 fps), 60 fps at ≤ 848×480 |
+| `--accel-hz {100,200,400}` `--gyro-hz {200,400}` | requested IMU rates (default 200 / 200; see the note below) |
+| `--no-imu` | skip the motion module |
+| `--warmup S` | seconds discarded at the start while auto-exposure settles (default 1) |
+| `--serial N` | pick a camera when several are connected |
+
+### What it writes
+
+| file | content |
+| --- | --- |
+| `rgb.mp4` | colour video (H.264), one frame per row of `frames.csv` |
+| `depth/000000.png …` | 16-bit depth in **mm**, **aligned to the colour image** (same size as RGB, 0 = no data) |
+| `imu.csv` | `timestamp, a_x, a_y, a_z, alpha_x, alpha_y, alpha_z`: same columns and units as Stray Scanner (g, rad/s), gyro linearly resampled to the accel timestamps |
+| `accel.csv`, `gyro.csv` | raw motion samples at their own timestamps: `timestamp, x, y, z` in m/s² and rad/s |
+| `frames.csv` | `timestamp, frame, color_timestamp, depth_timestamp, hw_frame_number, fx, fy, cx, cy` |
+| `camera_matrix.csv` | 3×3 colour intrinsics (they apply to the aligned depth too) |
+| `metadata.json` | device, serial, firmware, stream modes, intrinsics, depth scale, measured IMU rates, dropped-frame count |
+
+All timestamps are seconds on the RealSense **global time** clock (host-synchronised), shared by every stream.
+Colour and depth come from one frameset (typically < 1 frame apart). IMU samples arrive via a separate pipeline
+callback, so none are lost while frames are written. Frames are written by a background thread; the console
+reports frames, IMU samples, frames dropped by the camera/USB (gaps in the hardware frame counter) and the queue size.
+
+The camera has **no pose tracking and no confidence maps**, so the dashboard shows RGB | depth on top and the IMU
+row only (`--relative` is ignored).
+
+**IMU notes.**
+* Axes (RealSense IMU frame): x right, y down, z forward out of the lens. The accelerometer measures the reaction
+  to gravity, so a camera looking straight up reads about +1 g on z, and one standing level reads about −1 g on y.
+* On the tested D435if (firmware 5.17) the accelerometer streams at ~400 Hz whatever rate is requested; the gyro
+  follows the requested rate. `metadata.json` records the measured rates.
 
 ## Keeping recordings out of git
 
