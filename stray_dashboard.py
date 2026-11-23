@@ -86,12 +86,63 @@ def read_csv(path: Path) -> pd.DataFrame:
     return df
 
 
-def quat_to_euler_deg(qx, qy, qz, qw):
-    """Quaternion -> (roll, pitch, yaw) in degrees, ZYX (yaw-pitch-roll) convention, unwrapped."""
-    roll = np.arctan2(2 * (qw * qx + qy * qz), 1 - 2 * (qx * qx + qy * qy))
-    pitch = np.arcsin(np.clip(2 * (qw * qy - qz * qx), -1.0, 1.0))
-    yaw = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
-    return [np.degrees(np.unwrap(a)) for a in (roll, pitch, yaw)]
+def quat_to_mat(qx, qy, qz, qw) -> np.ndarray:
+    """(N,) quaternion components -> (N, 3, 3) rotation matrices (camera-to-world for ARKit poses)."""
+    q = np.stack([qx, qy, qz, qw], axis=1).astype(np.float64)
+    q /= np.linalg.norm(q, axis=1, keepdims=True)
+    x, y, z, w = q.T
+    return np.stack(
+        [
+            np.stack([1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)], axis=1),
+            np.stack([2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)], axis=1),
+            np.stack([2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)], axis=1),
+        ],
+        axis=1,
+    )
+
+
+def mat_to_euler_deg(R: np.ndarray):
+    """(N, 3, 3) -> [angle about x, about y, about z] in degrees, ZYX (yaw-pitch-roll) convention, unwrapped."""
+    ax = np.arctan2(R[:, 2, 1], R[:, 2, 2])
+    ay = np.arcsin(np.clip(-R[:, 2, 0], -1.0, 1.0))
+    az = np.arctan2(R[:, 1, 0], R[:, 0, 0])
+    return [np.degrees(np.unwrap(a)) for a in (ax, ay, az)]
+
+
+# --relative modes: how the odometry pose is expressed in the plots
+POSE_MODES = ("absolute", "world", "camera")
+
+
+def pose_series(odom: pd.DataFrame, mode: str = "absolute"):
+    """Return (positions, position labels, position title, angles, angle labels, angle title) for the plots.
+
+    absolute: raw ARKit pose; origin = where ARKit started tracking (before recording began).
+    world:    subtract the first frame: position p - p0 and rotation R R0^T, still in ARKit's world axes
+              (y = up against gravity, x/z = arbitrary horizontal directions).
+    camera:   motion since the first frame in the phone's *starting* camera axes:
+              R0^T (p - p0) and R0^T R. ARKit camera axes: x = image right, y = image up,
+              z = backwards (the camera looks along -z).
+    """
+    p = odom[["x", "y", "z"]].to_numpy(np.float64)
+    R = quat_to_mat(*(odom[c].to_numpy() for c in ("qx", "qy", "qz", "qw")))
+    if mode == "absolute":
+        pos, rot = p, R
+        pl, al = ["x", "y", "z"], ["roll (x)", "pitch (y)", "yaw (z)"]
+        pt, at = "Odometry · position (ARKit world)", "Odometry · orientation (ZYX Euler)"
+    elif mode == "world":
+        pos = p - p[0]
+        rot = R @ R[0].T
+        pl, al = ["x", "y (up)", "z"], ["about x", "about y (heading)", "about z"]
+        pt, at = "Odometry · position since start (world axes)", "Odometry · rotation since start (world axes)"
+    elif mode == "camera":
+        R0T = R[0].T
+        pos = (p - p[0]) @ R0T.T  # == R0^T (p - p0) per row
+        rot = R0T @ R
+        pl, al = ["x (right)", "y (up)", "z (back)"], ["tilt (x)", "pan (y)", "roll (z)"]
+        pt, at = "Odometry · position since start (camera axes)", "Odometry · rotation since start (camera axes)"
+    else:
+        raise ValueError(f"unknown pose mode {mode!r}")
+    return [pos[:, 0], pos[:, 1], pos[:, 2]], pl, pt, mat_to_euler_deg(rot), al, at
 
 
 @dataclass
@@ -274,7 +325,7 @@ class TopRow:
 # Rows 2 + 3 (matplotlib with blitting)
 # --------------------------------------------------------------------------
 class PlotRows:
-    def __init__(self, width: int, height: int, scale: float, rec: Recording):
+    def __init__(self, width: int, height: int, scale: float, rec: Recording, pose_mode: str = "absolute"):
         dpi = 100 * scale
         plt.rcParams.update(
             {
@@ -332,9 +383,9 @@ class PlotRows:
                 ax.set_title(name + " (no imu.csv)", loc="left", fontsize=11, color=FG)
         o = rec.odom
         to = o["timestamp"].to_numpy() - rec.t0
-        make_axes(1, 0, "Odometry · position", to, [o[c].to_numpy() for c in ("x", "y", "z")], ["x", "y", "z"], "position (m)")
-        eul = quat_to_euler_deg(*(o[c].to_numpy() for c in ("qx", "qy", "qz", "qw")))
-        make_axes(1, 1, "Odometry · orientation (ZYX Euler)", to, eul, ["roll", "pitch", "yaw"], "angle (deg)")
+        pos, pl, pt, ang, al, at = pose_series(o, pose_mode)
+        make_axes(1, 0, pt, to, pos, pl, "position (m)")
+        make_axes(1, 1, at, to, ang, al, "angle (deg)")
 
         self.fig.canvas.draw()
         self.bg = self.fig.canvas.copy_from_bbox(self.fig.bbox)
@@ -431,7 +482,7 @@ def default_output(root: Path) -> Path:
 
 
 def render(folder: Path, out: Path | None, fps: float | None, width: int, depth_range, min_conf: int,
-           max_frames: int | None) -> Path:
+           max_frames: int | None, pose_mode: str = "absolute") -> Path:
     root = find_recording_dir(folder)
     rec = load_recording(root)
     out = (out or default_output(root)).resolve()
@@ -476,7 +527,7 @@ def render(folder: Path, out: Path | None, fps: float | None, width: int, depth_
     total_h = top.height + plot_h
     total_h = int(np.ceil(total_h / 16) * 16)
     plot_h = total_h - top.height
-    plots = PlotRows(width, plot_h, scale, rec)
+    plots = PlotRows(width, plot_h, scale, rec, pose_mode)
     if plots.size != (width, plot_h):  # guard against DPI rounding
         print(f"  note: plot canvas {plots.size} resized to {(width, plot_h)}")
 
@@ -526,6 +577,11 @@ def main(argv=None):
                    help="fix the depth colour scale in mm; default = 1st-99th percentile of the recording")
     p.add_argument("--min-confidence", type=int, default=0, choices=(0, 1, 2),
                    help="black out depth pixels below this confidence level (default 0 = show all)")
+    p.add_argument("--relative", nargs="?", const="camera", default="absolute", choices=POSE_MODES,
+                   help="plot odometry as motion since the first frame, so position and rotation start at 0. "
+                        "'--relative' alone (= camera) uses the phone's starting camera axes "
+                        "(x right, y up, z back); '--relative world' keeps ARKit's world axes (y up). "
+                        "Default: absolute ARKit pose")
     p.add_argument("--max-frames", type=int, help="only render the first N output frames (quick preview)")
     a = p.parse_args(argv)
     if a.output and len(a.folders) > 1:
@@ -533,7 +589,7 @@ def main(argv=None):
     failed = 0
     for folder in a.folders:
         try:
-            render(folder, a.output, a.fps, a.width, a.depth_range, a.min_confidence, a.max_frames)
+            render(folder, a.output, a.fps, a.width, a.depth_range, a.min_confidence, a.max_frames, a.relative)
         except Exception as e:  # keep going for batch runs
             failed += 1
             print(f"ERROR on {folder}: {e}", file=sys.stderr)

@@ -47,6 +47,7 @@ in about 20 s at 1920 px wide.
 | `--width W` | output width in px (default 1920; height follows, about 0.59 × width). Rounded down to a multiple of 16. |
 | `--depth-range MIN MAX` | fix the depth colour scale in mm, e.g. `--depth-range 200 1500`. Default: 1st–99th percentile of the recording. Use a fixed range to compare recordings. |
 | `--min-confidence {0,1,2}` | black out depth pixels below this confidence level |
+| `--relative [camera\|world]` | plot odometry as **motion since the first frame**, so position and rotation start at 0. `--relative` alone uses the phone's starting camera axes; `--relative world` keeps ARKit's world axes. See [Odometry: absolute vs relative](#odometry-absolute-vs-relative). Put it *after* the folder path. |
 | `--max-frames N` | render only the first N frames (quick preview) |
 
 Batch over several recordings:
@@ -81,7 +82,30 @@ CSV headers have leading spaces after the commas; the script strips them. Conven
 * **IMU / odometry plots:** IMU and odometry timestamps share the same device clock (seconds since boot); the
   plots show `timestamp − first timestamp` and draw every sample with `timestamp ≤ now`.
 * **Orientation** is the odometry quaternion converted to ZYX (yaw-pitch-roll) Euler angles in degrees, unwrapped
-  so it doesn't jump at ±180°. The absolute values depend on ARKit's world frame; the changes are what matter.
+  so it doesn't jump at ±180°. The absolute values depend on ARKit's world frame; use `--relative` to start
+  position and rotation at zero (see below).
+
+### Odometry: absolute vs relative
+
+By default the odometry row shows the raw ARKit pose. ARKit puts its origin (0, 0, 0) where the phone was when
+**tracking started**, which is when Stray Scanner opened its recording screen, not when you tapped record. Any
+movement in between shows up as an offset at t = 0 (on the samples, from about 2 cm to 22 cm), and orientation
+starts at whatever angle the phone had relative to that starting direction.
+
+| mode | position | rotation | axes |
+| --- | --- | --- | --- |
+| default (absolute) | `p` | `R` | ARKit world: y up (against gravity), x/z horizontal in an arbitrary direction |
+| `--relative world` | `p − p₀` | `R · R₀ᵀ` | same world axes, so `y (up)` is true height change and `about y` is heading change |
+| `--relative` (= `camera`) | `R₀ᵀ (p − p₀)` | `R₀ᵀ · R` | the phone's camera axes **at the first frame**: x = image right, y = image up, z = backwards (the camera looks along −z) |
+
+For a phone fixed in a sliding mount, `--relative` (camera) is usually the most useful: a slide along the rail
+shows up mainly on one axis no matter how the rig was standing when you started. Angles are ZYX Euler, labelled
+tilt (about x), pan (about y) and roll (about z) in camera mode. The distance travelled is the same in every mode;
+only the starting point and the axes change.
+
+```powershell
+py stray_dashboard.py "D:\scans\9c74aaa7f0" --relative
+```
 
 ## Keeping recordings out of git
 
