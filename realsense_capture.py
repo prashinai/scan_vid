@@ -328,7 +328,7 @@ def draw_view(color: np.ndarray, depth_mm: np.ndarray, st: dict) -> np.ndarray:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Live view + start/stop recording for a RealSense D435i/D435if.")
     p.add_argument("-o", "--out-dir", type=Path, default=None,
-                   help="folder that receives one rs_<date>_<time> folder per take (default: recordings\ next to this script)")
+                   help="folder that receives one rs_<date>_<time> folder per take (default: recordings/ next to this script)")
     p.add_argument("--record", action="store_true", help="start recording immediately")
     p.add_argument("--duration", type=float, help="record one take of this many seconds, then exit (implies --record)")
     p.add_argument("--no-window", action="store_true", help="no live window; control from the terminal only")
