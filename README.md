@@ -117,11 +117,21 @@ IR-pass filter) over USB 3. It uses `pyrealsense2` (in `requirements.txt`; the I
 installer is not needed).
 
 ```powershell
-py realsense_capture.py --preview
+py realsense_capture.py
 ```
 
-The `--preview` window shows RGB | depth live; press **q** or **Esc** to stop (or Ctrl+C in the terminal).
-Recordings go to `%USERPROFILE%\Videos\RealSense\rs_<date>_<time>\` by default, outside the repo. Then:
+A **live view** window opens straight away (RGB | depth) but nothing is recorded until you start a take:
+
+| action | window (click it first) | terminal |
+| --- | --- | --- |
+| start / stop recording | **Space** or **R** | **Enter** (or `r`; also `start` / `stop`) |
+| quit | **Q**, **Esc** or close the window | `q` or Ctrl+C |
+
+While recording, the window gets a **red border** and a red banner with a blinking ● **REC** timer, the frame
+count and the take's folder name. When idle it shows a green **LIVE (not recording)** banner. Every start/stop
+creates a new take folder `%USERPROFILE%\Videos\RealSense\rs_<date>_<time>\` (outside the repo). It is saved in
+the background, so the live view keeps running and you can start the next take straight away. The terminal
+prints the `stray_dashboard.py` command for each saved take, e.g.:
 
 ```powershell
 py stray_dashboard.py "$env:USERPROFILE\Videos\RealSense\rs_20261122_224237"
@@ -129,13 +139,14 @@ py stray_dashboard.py "$env:USERPROFILE\Videos\RealSense\rs_20261122_224237"
 
 | option | meaning |
 | --- | --- |
-| `-o DIR` | output folder (must be new or empty) |
-| `--duration S` | stop after S seconds |
-| `--preview` | live RGB / depth window |
+| `-o DIR` | folder that receives the take folders (default `~\Videos\RealSense`) |
+| `--record` | start the first take immediately (after `--warmup`) |
+| `--duration S` | record one take of S seconds, then exit (implies `--record`; handy for scripts) |
+| `--no-window` | no live window; control from the terminal only |
 | `--width W --height H --fps N` | colour + depth mode, default 640×480 @ 30. The D435if also offers 848×480, 1280×720 (30 fps), 60 fps at ≤ 848×480 |
 | `--accel-hz {100,200,400}` `--gyro-hz {200,400}` | requested IMU rates (default 200 / 200; see the note below) |
 | `--no-imu` | skip the motion module |
-| `--warmup S` | seconds discarded at the start while auto-exposure settles (default 1) |
+| `--warmup S` | with `--record` / `--duration`: seconds to wait for auto-exposure before the take starts (default 1) |
 | `--serial N` | pick a camera when several are connected |
 
 ### What it writes
